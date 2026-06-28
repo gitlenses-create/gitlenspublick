@@ -1,4 +1,4 @@
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
     const token = process.env.GITHUB_TOKEN;
     if (!token) {
         res.status(500).json({ message: "GitHub token not configured" });
@@ -33,4 +33,4 @@ export default async function handler(req, res) {
     } catch (error) {
         res.status(500).json({ message: "GitHub proxy error" });
     }
-}
+};
