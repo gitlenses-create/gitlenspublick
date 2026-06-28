@@ -1,19 +1,7 @@
 /* GitLens — Vue components and client-side routing */
 
 Vue.component("app-frame", {
-    template: "#app-frame",
-    data: () => ({
-        requestsLeft: null
-    }),
-    created() {
-        this._timer = setInterval(() => {
-            this.requestsLeft = window.GitLensRate.requestsLeft;
-        }, 800);
-        GitLens.refreshRate();
-    },
-    beforeDestroy() {
-        clearInterval(this._timer);
-    }
+    template: "#app-frame"
 });
 
 Vue.component("site-header", {
@@ -91,6 +79,12 @@ Vue.component("user-info", {
 Vue.component("donut-charts", {
     template: "#donut-charts",
     props: ["data"],
+    computed: {
+        maxLangStars() {
+            const values = Object.values(this.data.langStarCount || {});
+            return values.length ? Math.max(...values) : 0;
+        }
+    },
     mounted() {
         donutChart("langRepoCount", this.data);
         donutChart("langStarCount", this.data);

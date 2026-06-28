@@ -1,6 +1,6 @@
 /*
- * GitLens — client-side GitHub data aggregation.
- * Uses Vercel proxy when available, falls back to direct GitHub API.
+ * GitLens — GitHub data aggregation (matches profile-summary-for-github.com logic).
+ * Uses contributors + participation stats for reliable commit counts.
  */
 (function () {
     const DIRECT_API = "https://api.github.com";
@@ -11,7 +11,9 @@
         return host !== "localhost" && host !== "127.0.0.1";
     }
 
-    window.GitLensRate = window.GitLensRate || {requestsLeft: null};
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
 
     function getToken() {
         try {
@@ -72,43 +74,50 @@
         return status >= 500;
     }
 
-    function trackRate(response) {
-        const left = response && response.headers && response.headers["x-ratelimit-remaining"];
-        if (left !== undefined && left !== null && left !== "") {
-            window.GitLensRate.requestsLeft = parseInt(left, 10);
-        }
-        return response;
-    }
-
     async function apiGet(path, config) {
         if (usesServerProxy()) {
             try {
-                return trackRate(await proxyClient().get(path, config));
+                return await proxyClient().get(path, config);
             } catch (error) {
                 if (!isProxyFailure(error)) {
                     throw error;
                 }
             }
         }
-        return trackRate(await directClient().get(path, config));
+        return directClient().get(path, config);
     }
 
-    async function refreshRate() {
-        try {
-            const res = await apiGet("/rate_limit");
-            const core = res.data && res.data.resources && res.data.resources.core;
-            if (core) {
-                window.GitLensRate.requestsLeft = core.remaining;
+    async function fetchStats(path) {
+        for (let attempt = 0; attempt < 6; attempt++) {
+            try {
+                const res = await apiGet(path);
+                if (res.status === 202) {
+                    await sleep(1500 + attempt * 500);
+                    continue;
+                }
+                return res.data;
+            } catch (e) {
+                if (attempt === 5) {
+                    return null;
+                }
+                await sleep(1000);
             }
-        } catch (e) {}
+        }
+        return null;
     }
 
-    function lastPageFromLink(linkHeader) {
-        if (!linkHeader) return null;
-        const match = linkHeader.split(",").find(p => p.includes('rel="last"'));
-        if (!match) return null;
-        const pageMatch = match.match(/[?&]page=(\d+)/);
-        return pageMatch ? parseInt(pageMatch[1], 10) : null;
+    async function contributorCommits(login, repo) {
+        try {
+            const res = await apiGet(`/repos/${login}/${repo}/contributors`, {
+                params: {anon: "true", per_page: 100}
+            });
+            const match = res.data.find(c =>
+                c.login && c.login.toLowerCase() === login.toLowerCase()
+            );
+            return match ? match.contributions : 0;
+        } catch (e) {
+            return 0;
+        }
     }
 
     async function fetchAllRepos(login) {
@@ -126,36 +135,44 @@
         return repos.filter(r => !r.fork);
     }
 
-    async function commitCountForRepo(login, repo) {
-        try {
-            const res = await apiGet(`/repos/${login}/${repo}/commits`, {
-                params: {author: login, per_page: 1}
-            });
-            const last = lastPageFromLink(res.headers && res.headers.link);
-            if (last !== null) return last;
-            return res.data.length;
-        } catch (e) {
-            return 0;
-        }
-    }
-
-    async function recentCommitDates(login, repo) {
-        try {
-            const res = await apiGet(`/repos/${login}/${repo}/commits`, {
-                params: {author: login, per_page: 100}
-            });
-            return res.data
-                .map(c => c.commit && c.commit.author && c.commit.author.date)
-                .filter(Boolean);
-        } catch (e) {
-            return [];
-        }
-    }
-
     function quarterOf(dateStr) {
         const d = new Date(dateStr);
         const q = Math.floor(d.getMonth() / 3) + 1;
         return d.getFullYear() + " Q" + q;
+    }
+
+    function parseQuarter(label) {
+        const [y, q] = label.split(" Q");
+        return parseInt(y, 10) * 4 + (parseInt(q, 10) - 1);
+    }
+
+    function formatQuarter(index) {
+        const year = Math.floor(index / 4);
+        const q = (index % 4) + 1;
+        return year + " Q" + q;
+    }
+
+    function fillQuartersFromJoin(buckets, createdAt) {
+        const start = parseQuarter(quarterOf(createdAt));
+        const end = parseQuarter(quarterOf(new Date().toISOString()));
+        const out = {};
+        for (let i = start; i <= end; i++) {
+            const label = formatQuarter(i);
+            out[label] = buckets[label] || 0;
+        }
+        return out;
+    }
+
+    function addParticipationToQuarters(ownerWeeks, buckets) {
+        if (!ownerWeeks || !ownerWeeks.length) return;
+        const total = ownerWeeks.length;
+        ownerWeeks.forEach((count, i) => {
+            if (!count) return;
+            const weeksFromEnd = total - 1 - i;
+            const weekDate = new Date(Date.now() - weeksFromEnd * 7 * 24 * 3600 * 1000);
+            const q = quarterOf(weekDate.toISOString());
+            buckets[q] = (buckets[q] || 0) + count;
+        });
     }
 
     function sortByValueDesc(obj) {
@@ -201,31 +218,25 @@
         });
 
         onProgress && onProgress("Counting commits…");
-        const reposForCommits = repos.slice(0, 40);
         const repoCommitCountAll = {};
         const langCommitCount = {};
-        for (const r of reposForCommits) {
-            const count = await commitCountForRepo(login, r.name);
+        const quarterBuckets = {};
+
+        for (const r of repos) {
+            const count = await contributorCommits(login, r.name);
             if (count > 0) {
                 repoCommitCountAll[r.name] = count;
                 const lang = r.language || UNKNOWN_LANGUAGE;
                 langCommitCount[lang] = (langCommitCount[lang] || 0) + count;
             }
+
+            const participation = await fetchStats(`/repos/${login}/${r.name}/stats/participation`);
+            if (participation && participation.owner) {
+                addParticipationToQuarters(participation.owner, quarterBuckets);
+            }
         }
 
-        onProgress && onProgress("Building activity timeline…");
-        const topCommitRepos = sortByValueDesc(repoCommitCountAll).slice(0, 8).map(e => e[0]);
-        const quarterBuckets = {};
-        const allDates = [];
-        for (const repoName of topCommitRepos) {
-            const dates = await recentCommitDates(login, repoName);
-            dates.forEach(d => allDates.push(d));
-        }
-        allDates.forEach(d => {
-            const q = quarterOf(d);
-            quarterBuckets[q] = (quarterBuckets[q] || 0) + 1;
-        });
-        const quarterCommitCount = fillQuarters(quarterBuckets);
+        const quarterCommitCount = fillQuartersFromJoin(quarterBuckets, user.createdAt);
 
         const sortedLangRepo = {};
         sortByValueDesc(langRepoCount).forEach(([k, v]) => sortedLangRepo[k] = v);
@@ -247,30 +258,9 @@
         };
     }
 
-    function fillQuarters(buckets) {
-        const keys = Object.keys(buckets);
-        if (!keys.length) return {};
-        const parse = k => {
-            const [y, q] = k.split(" Q");
-            return parseInt(y, 10) * 4 + (parseInt(q, 10) - 1);
-        };
-        const sorted = keys.sort((a, b) => parse(a) - parse(b));
-        let start = parse(sorted[0]);
-        const end = parse(sorted[sorted.length - 1]);
-        const out = {};
-        for (let i = start; i <= end; i++) {
-            const year = Math.floor(i / 4);
-            const q = (i % 4) + 1;
-            const label = year + " Q" + q;
-            out[label] = buckets[label] || 0;
-        }
-        return out;
-    }
-
     window.GitLens = {
         buildProfile,
         getToken,
-        setToken,
-        refreshRate
+        setToken
     };
 })();

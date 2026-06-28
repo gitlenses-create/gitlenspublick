@@ -140,17 +140,17 @@
                     <h2>Repos per Language</h2>
                     <canvas id="langRepoCount"></canvas>
                 </div>
-                <div v-if="Object.keys(data.langStarCount).length > 0" class="chart-container chart-container--third">
+                <div v-if="maxLangStars > 0" class="chart-container chart-container--third">
                     <h2>Stars per Language</h2>
                     <canvas id="langStarCount"></canvas>
                 </div>
-                <div v-if="Object.keys(data.langCommitCount).length > 0" class="chart-container chart-container--third">
+                <div class="chart-container chart-container--third">
                     <h2>Commits per Language</h2>
                     <canvas id="langCommitCount"></canvas>
                 </div>
             </div>
             <div class="chart-row">
-                <div v-if="Object.keys(data.repoCommitCount).length > 0" class="chart-container chart-container--half">
+                <div class="chart-container chart-container--half">
                     <h2>Commits per Repo
                         <small v-if="Object.keys(data.repoCommitCount).length === 10">(top 10)</small>
                     </h2>
@@ -191,10 +191,6 @@
                 Follow updates on
                 <a href="https://x.com/gitlensinfo" target="_blank" rel="noopener">@gitlensinfo</a>.
             </footer>
-            <span class="rate-limit" v-if="requestsLeft !== null">
-                <span v-if="requestsLeft === 0">GitHub API rate-limited<br>Add a token or check back later</span>
-                <span v-else><strong>{{requestsLeft}}</strong> GitHub API requests left <br> before rate-limit</span>
-            </span>
         </div>
     </template>
 
@@ -542,7 +538,7 @@
 
         .error-back-button:hover { background: var(--accent-dark); }
 
-        /* ---- footer / rate ---- */
+        /* ---- footer ---- */
         footer {
             font-size: 17px;
             position: fixed;
@@ -553,17 +549,6 @@
             padding: 10px 30px;
             border-top: 1px solid rgba(37, 48, 74, 0.1);
             background: #eaf1fd;
-        }
-
-        .rate-limit {
-            position: fixed;
-            right: 20px;
-            bottom: 60px;
-            background: #fff;
-            padding: 10px;
-            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-            font-size: 16px;
-            border-radius: 6px;
         }
 
         @media (max-width: 900px) {
@@ -601,7 +586,6 @@
 
             .chart-row { padding-bottom: 20px; }
             .chart-container { padding: 15px 10px; }
-            .rate-limit { padding: 5px 8px; font-size: 13px; bottom: 0; right: 0; }
         }
     </style>
 </head>
@@ -613,7 +597,7 @@
     </div>
 
     <script src="assets/js/charts.js"></script>
-    <script src="https://cdn.jsdelivr.net/gh/gitlenses-create/gitlenspublick@main/assets/js/github.js"></script>
+    <script src="assets/js/github.js"></script>
     <script src="assets/js/app.js"></script>
 </body>
 </html>
