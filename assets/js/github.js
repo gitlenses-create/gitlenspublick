@@ -50,7 +50,20 @@
         if (!usesServerProxy() && token) {
             headers.Authorization = "token " + token;
         }
-        return axios.create({baseURL: apiBase(), headers: headers});
+
+        const instance = axios.create({baseURL: apiBase(), headers: headers});
+
+        if (usesServerProxy()) {
+            instance.interceptors.request.use(config => {
+                const path = (config.url || "").replace(/^\//, "");
+                const params = {...(config.params || {})};
+                config.url = "";
+                config.params = {path, ...params};
+                return config;
+            });
+        }
+
+        return instance;
     }
 
     function trackRate(response) {
