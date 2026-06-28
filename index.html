@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>GitLens — Visualize Your GitHub Activity</title>
+    <link rel="icon" href="/favicon.png">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="GitLens visualizes any GitHub profile with beautiful charts and statistics. Explore commits, languages, stars and repository activity in an interactive dashboard.">
+    <link rel="canonical" href="https://gitlens.info/">
+    <meta property="og:title" content="GitLens — Visualize Your GitHub Activity">
+    <meta property="og:site_name" content="GitLens">
+    <meta property="og:url" content="https://gitlens.info/">
+    <meta property="og:description" content="GitLens visualizes any GitHub profile with beautiful charts and statistics.">
+    <meta property="og:type" content="website">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:site" content="@gitlensinfo">
+    <meta name="twitter:creator" content="@gitlensinfo">
+    <meta name="twitter:title" content="GitLens — Visualize Your GitHub Activity">
+    <meta name="twitter:description" content="GitLens visualizes any GitHub profile with beautiful charts and statistics.">
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Barlow+Semi+Condensed">
+    <link rel="stylesheet" href="assets/vendor/square-jelly-box.min.css">
+
+    <script src="assets/vendor/Chart.min.js"></script>
+    <script src="assets/vendor/axios.min.js"></script>
+    <script src="assets/vendor/vue.js"></script>
+    <script src="assets/vendor/moment.min.js"></script>
+    <script src="assets/vendor/js.cookie.min.js"></script>
+
+    <!-- site-header -->
+    <template id="site-header">
+        <header class="site-header">
+            <a class="brand" href="./" title="GitLens">
+                <img class="brand-logo" src="assets/logo.png" alt="GitLens logo">
+                <span class="brand-name">Git<span class="brand-accent">Lens</span></span>
+            </a>
+            <nav class="site-nav">
+                <a class="twitter-btn" href="https://x.com/gitlensinfo" target="_blank" rel="noopener" title="Follow GitLens on Twitter">
+                    <i class="fa fa-twitter"></i><span>Follow</span>
+                </a>
+            </nav>
+        </header>
+    </template>
+
+    <!-- search-view -->
+    <template id="search-view">
+        <app-frame>
+            <div class="search-screen">
+                <h1>Enter a GitHub username</h1>
+                <p class="search-sub">GitLens turns any public GitHub profile into an interactive dashboard.</p>
+                <div class="search-input-container">
+                    <input type="text" name="q" placeholder="ex. 'tipsy'" v-model="query" autofocus @keydown.enter="search">
+                </div>
+                <button @click="search" :disabled="!query.trim()">View Profile</button>
+
+                <a class="token-toggle" @click.prevent="toggleToken">
+                    <i class="fa" :class="showToken ? 'fa-chevron-up' : 'fa-cog'"></i>
+                    {{ showToken ? 'Hide token settings' : 'Rate limited? Add a GitHub token' }}
+                </a>
+                <div v-if="showToken" class="token-box">
+                    <input type="password" placeholder="GitHub personal access token (optional)" v-model="token">
+                    <p class="token-hint">
+                        Stored only in your browser. Lifts the GitHub API limit from 60 to 5000 requests/hour.
+                        A token with no scopes (public access) is enough.
+                    </p>
+                </div>
+            </div>
+        </app-frame>
+    </template>
+
+    <!-- user-view -->
+    <template id="user-view">
+        <app-frame>
+            <div class="back-button-container">
+                <a href="#" class="back-button" @click.prevent="back">
+                    <i class="fa fa-arrow-left"></i> Search Another User
+                </a>
+            </div>
+            <loading-bouncer v-if="!data && !error" :status="status"></loading-bouncer>
+            <div v-if="data" class="fade-in">
+                <share-bar :user="user"></share-bar>
+                <user-info :user="user" :data="data"></user-info>
+                <donut-charts :data="data"></donut-charts>
+            </div>
+            <div v-if="error" class="error-container">
+                <div class="error-box">
+                    <i class="fa fa-exclamation-circle error-icon"></i>
+                    <div v-if="error.response && error.response.status === 404">
+                        <h3>User Not Found</h3>
+                        <p>We couldn't find a GitHub user with that username. Please check the spelling and try again.</p>
+                    </div>
+                    <div v-else-if="error.response && (error.response.status === 403 || error.response.status === 429)">
+                        <h3>Rate Limited</h3>
+                        <p>GitLens hit the GitHub API rate limit. Add a personal access token on the search screen, or come back a little later.</p>
+                    </div>
+                    <div v-else>
+                        <h3>Something Went Wrong</h3>
+                        <p>An unexpected error occurred. Please try again in a moment.</p>
+                    </div>
+                    <a href="#" class="error-back-button" @click.prevent="back">← Back to Search</a>
+                </div>
+            </div>
+        </app-frame>
+    </template>
+
+    <!-- share-bar -->
+    <template id="share-bar">
+        <div class="share-bar">
+            <a class="social-btn" :href="twitterUrl" target="_blank" rel="nofollow" title="Share on Twitter"><i class="fa fa-fw fa-twitter"></i>Share on Twitter</a>
+            <a class="social-btn copy-link-btn" :class="{copied: copied}" @click.prevent="copyLink" :title="copyButtonText">
+                <i class="fa fa-fw" :class="copied ? 'fa-check' : 'fa-link'"></i>{{ copyButtonText }}
+            </a>
+        </div>
+    </template>
+
+    <!-- user-info -->
+    <template id="user-info">
+        <div class="user-info">
+            <img :src="user.avatarUrl" :alt="user.login">
+            <div class="details">
+                <div><i class="fa fa-fw fa-user"></i>{{ user.login }}
+                    <small v-if="user.name">({{ user.name }})</small>
+                </div>
+                <div><i class="fa fa-fw fa-database"></i>{{ user.publicRepos }} public repos</div>
+                <div><i class="fa fa-fw fa-clock-o"></i>Joined GitHub {{ timeAgo }}</div>
+                <div><i class="fa fa-fw fa-external-link"></i><a :href="user.htmlUrl" target="_blank">View profile on GitHub</a></div>
+            </div>
+            <div class="chart-container commits-per-quarter">
+                <canvas id="quarterCommitCount"></canvas>
+            </div>
+        </div>
+    </template>
+
+    <!-- donut-charts -->
+    <template id="donut-charts">
+        <div class="charts">
+            <div class="chart-row">
+                <div class="chart-container chart-container--third">
+                    <h2>Repos per Language</h2>
+                    <canvas id="langRepoCount"></canvas>
+                </div>
+                <div v-if="Object.keys(data.langStarCount).length > 0" class="chart-container chart-container--third">
+                    <h2>Stars per Language</h2>
+                    <canvas id="langStarCount"></canvas>
+                </div>
+                <div v-if="Object.keys(data.langCommitCount).length > 0" class="chart-container chart-container--third">
+                    <h2>Commits per Language</h2>
+                    <canvas id="langCommitCount"></canvas>
+                </div>
+            </div>
+            <div class="chart-row">
+                <div v-if="Object.keys(data.repoCommitCount).length > 0" class="chart-container chart-container--half">
+                    <h2>Commits per Repo
+                        <small v-if="Object.keys(data.repoCommitCount).length === 10">(top 10)</small>
+                    </h2>
+                    <canvas id="repoCommitCount"></canvas>
+                </div>
+                <div v-if="Object.keys(data.repoStarCount).length > 0" class="chart-container chart-container--half">
+                    <h2>Stars per Repo
+                        <small v-if="Object.keys(data.repoStarCount).length == 10">(top 10)</small>
+                    </h2>
+                    <canvas id="repoStarCount"></canvas>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- loading-bouncer -->
+    <template id="loading-bouncer">
+        <div class="loading-bouncer" style="opacity: 0; animation: fade-in 0.2s linear 0.5s forwards">
+            <div class="la-square-jelly-box la-3x">
+                <div></div>
+                <div></div>
+            </div>
+            <h2>{{ status }}</h2>
+            <h3 style="opacity: 0; animation: fade-in 0.2s linear 4s forwards">This could take some time …</h3>
+            <h3 style="opacity: 0; animation: fade-in 0.2s linear 8s forwards">This user has a lot of repos!</h3>
+        </div>
+    </template>
+
+    <!-- app-frame -->
+    <template id="app-frame">
+        <div>
+            <main class="main-content">
+                <slot></slot>
+            </main>
+            <footer>
+                GitLens visualizes GitHub profiles with
+                <a href="http://www.chartjs.org/docs/latest/" target="_blank">chart.js</a> <small>(visualization)</small>.
+                Follow updates on
+                <a href="https://x.com/gitlensinfo" target="_blank" rel="noopener">@gitlensinfo</a>.
+            </footer>
+            <span class="rate-limit" v-if="requestsLeft !== null">
+                <span v-if="requestsLeft === 0">GitHub API rate-limited<br>Add a token or check back later</span>
+                <span v-else><strong>{{requestsLeft}}</strong> GitHub API requests left <br> before rate-limit</span>
+            </span>
+        </div>
+    </template>
+
+    <style>
+        * {
+            font-family: 'Barlow Semi Condensed', sans-serif;
+            outline: 0;
+            box-sizing: border-box;
+        }
+
+        [v-cloak] {
+            display: none;
+        }
+
+        :root {
+            --accent: #4f6ef7;
+            --accent-dark: #3a55d6;
+        }
+
+        html {
+            font-size: 18px;
+            background: radial-gradient(circle at 20% 20%, #f1f6ff, #dde9fb);
+            padding: 0 30px 60px;
+            overflow-y: scroll;
+            min-height: 100vh;
+        }
+
+        body {
+            margin: 0;
+        }
+
+        h1, h2, h3, h4 {
+            font-weight: 400;
+        }
+
+        a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .content {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .fade-in {
+            opacity: 0;
+            animation: fade-in .2s linear forwards;
+        }
+
+        @keyframes fade-in {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        /* ---- header ---- */
+        .site-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 18px 4px 26px;
+            margin-bottom: 10px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #25304a;
+            font-size: 26px;
+            letter-spacing: 0.5px;
+        }
+
+        .brand-logo {
+            height: 42px;
+            width: 42px;
+            border-radius: 50%;
+            object-fit: cover;
+            box-shadow: 0 1px 4px rgba(37, 48, 74, 0.18);
+        }
+
+        .brand-name { font-weight: 500; }
+        .brand-accent { color: var(--accent); }
+
+        .twitter-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: #1da1f2;
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 999px;
+            font-size: 16px;
+            box-shadow: 0 2px 6px rgba(29, 161, 242, 0.35);
+            transition: transform .15s, box-shadow .15s;
+        }
+
+        .twitter-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(29, 161, 242, 0.45);
+        }
+
+        /* ---- search ---- */
+        .search-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 30px;
+        }
+
+        .search-sub {
+            color: #5a6478;
+            margin: -4px 0 22px;
+            text-align: center;
+            max-width: 420px;
+        }
+
+        .search-input-container {
+            width: 100%;
+            max-width: 300px;
+        }
+
+        .search-screen input {
+            width: 100%;
+            height: 40px;
+            font-size: 18px;
+            padding: 0 15px;
+            border: 2px solid transparent;
+            border-radius: 6px;
+            transition: all 0.2s;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            background: #fff;
+        }
+
+        .search-screen input:hover {
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+        }
+
+        .search-screen input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 2px 8px rgba(79, 110, 247, 0.25);
+        }
+
+        .search-screen button {
+            margin-top: 20px;
+            height: 40px;
+            font-size: 18px;
+            padding: 0 25px;
+            border: 0;
+            line-height: 1;
+            background: var(--accent);
+            color: white;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: background 0.2s;
+        }
+
+        .search-screen button:hover:not(:disabled) {
+            background: var(--accent-dark);
+        }
+
+        .search-screen button:disabled {
+            background: #ccd3e6;
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+
+        .token-toggle {
+            margin-top: 24px;
+            font-size: 14px;
+            cursor: pointer;
+            color: #5a6478;
+        }
+
+        .token-toggle:hover { color: var(--accent); }
+        .token-toggle .fa { margin-right: 5px; }
+
+        .token-box {
+            margin-top: 12px;
+            width: 100%;
+            max-width: 360px;
+            text-align: center;
+        }
+
+        .token-box input {
+            width: 100%;
+            height: 38px;
+            font-size: 15px;
+            padding: 0 12px;
+            border: 2px solid transparent;
+            border-radius: 6px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            background: #fff;
+        }
+
+        .token-box input:focus { border-color: var(--accent); }
+
+        .token-hint {
+            font-size: 12px;
+            color: #7a8398;
+            margin-top: 8px;
+            line-height: 1.5;
+        }
+
+        /* ---- share-bar ---- */
+        .share-bar {
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(79, 110, 247, .08);
+            font-size: 14px;
+            text-align: center;
+            border-radius: 6px;
+            padding: 5px 10px;
+        }
+
+        .share-bar a {
+            white-space: nowrap;
+            margin: 5px 8px;
+            display: inline-block;
+            transition: opacity 0.2s;
+        }
+
+        .share-bar a:hover { opacity: 0.7; }
+        .share-bar a i { color: var(--accent); }
+        .copy-link-btn { cursor: pointer; }
+        .copy-link-btn.copied { color: #27ae60; }
+        .copy-link-btn .fa-check { color: #27ae60; }
+
+        /* ---- user-info ---- */
+        .user-info {
+            display: flex;
+            padding: 20px 0 40px;
+            position: relative;
+        }
+
+        .user-info img {
+            align-self: center;
+            border-radius: 6px;
+            width: 175px;
+            margin-right: 20px;
+        }
+
+        .user-info .details {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            margin-right: 20px;
+            flex-shrink: 0;
+        }
+
+        .user-info i.fa {
+            color: rgba(37, 48, 74, 0.7);
+            margin-right: 5px;
+        }
+
+        .user-info .commits-per-quarter {
+            flex-grow: 1;
+            flex-shrink: 1;
+            position: relative;
+        }
+
+        .user-info .commits-per-quarter::after {
+            content: "Commits per quarter (recent)";
+            position: absolute;
+            right: 40px;
+            bottom: -15px;
+            font-size: 13px;
+            color: #5a6478;
+        }
+
+        /* ---- charts ---- */
+        canvas { user-select: none; }
+        .charts, .chart-row { overflow: auto; }
+        .chart-row { padding-bottom: 40px; }
+
+        .chart-row {
+            border-top: 1px solid rgba(37, 48, 74, 0.1);
+            display: flex;
+            justify-content: space-around;
+        }
+
+        .chart-container--third { width: 33%; }
+        .chart-container--half { width: 50%; }
+        .chart-container h2 { color: #25304a; }
+
+        /* ---- back button ---- */
+        .back-button-container { margin-bottom: 20px; }
+
+        .back-button {
+            display: inline-block;
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.85);
+            border-radius: 6px;
+            font-size: 14px;
+            transition: background 0.2s;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+
+        .back-button:hover { background: #fff; }
+        .back-button i { margin-right: 5px; }
+
+        /* ---- loading ---- */
+        .loading-bouncer {
+            margin-top: 50px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .la-square-jelly-box { color: var(--accent); }
+        .loading-bouncer h2, .loading-bouncer h3 { color: #25304a; }
+
+        /* ---- error ---- */
+        .error-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 300px;
+        }
+
+        .error-box {
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+            text-align: center;
+            max-width: 500px;
+        }
+
+        .error-icon { font-size: 48px; color: #e74c3c; margin-bottom: 20px; }
+        .error-box h3 { margin: 0 0 10px 0; color: #25304a; }
+        .error-box p { margin: 0 0 20px 0; color: #666; line-height: 1.6; }
+
+        .error-back-button {
+            display: inline-block;
+            padding: 10px 20px;
+            background: var(--accent);
+            color: white;
+            border-radius: 6px;
+            margin-top: 10px;
+            transition: background 0.2s;
+        }
+
+        .error-back-button:hover { background: var(--accent-dark); }
+
+        /* ---- footer / rate ---- */
+        footer {
+            font-size: 17px;
+            position: fixed;
+            left: 0;
+            bottom: 0;
+            width: 100%;
+            text-align: center;
+            padding: 10px 30px;
+            border-top: 1px solid rgba(37, 48, 74, 0.1);
+            background: #eaf1fd;
+        }
+
+        .rate-limit {
+            position: fixed;
+            right: 20px;
+            bottom: 60px;
+            background: #fff;
+            padding: 10px;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+            font-size: 16px;
+            border-radius: 6px;
+        }
+
+        @media (max-width: 900px) {
+            .chart-container--third, .chart-container--half { width: 100%; }
+            .chart-row { display: block; }
+        }
+
+        @media (max-width: 480px) {
+            html { padding: 0 15px 30px; font-size: 16px; }
+            h1 { font-size: 24px; }
+            h2 { font-size: 20px; }
+            h3 { font-size: 18px; }
+
+            .site-header { padding: 14px 0 18px; }
+            .brand { font-size: 22px; }
+            .brand-logo { height: 34px; width: 34px; }
+            .twitter-btn span { display: none; }
+            .twitter-btn { padding: 8px 12px; }
+
+            .search-screen h1 { font-size: 24px; margin: 10px 0 10px 0; }
+            .search-input-container { max-width: 100%; padding: 0 10px; }
+            .search-screen input { font-size: 16px; height: 44px; }
+            .search-screen button { width: 100%; max-width: 300px; font-size: 16px; height: 44px; }
+
+            .share-bar {
+                width: 100%; position: relative; left: 0; transform: none;
+                margin-bottom: 20px; font-size: 12px; padding: 8px 5px;
+            }
+            .share-bar a { margin: 3px 4px; font-size: 12px; }
+
+            .user-info { flex-direction: column; align-items: center; text-align: center; }
+            .user-info img { width: 120px; margin-right: 0; margin-bottom: 15px; }
+            .user-info .details { margin-right: 0; margin-bottom: 15px; }
+            .user-info .commits-per-quarter { display: none; }
+
+            .chart-row { padding-bottom: 20px; }
+            .chart-container { padding: 15px 10px; }
+            .rate-limit { padding: 5px 8px; font-size: 13px; bottom: 0; right: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div id="main-vue" class="content" v-cloak>
+        <site-header></site-header>
+        <user-view v-if="login" :login="login" :key="login" @back="back"></user-view>
+        <search-view v-else @navigate="navigate"></search-view>
+    </div>
+
+    <script src="assets/js/charts.js"></script>
+    <script src="assets/js/github.js"></script>
+    <script src="assets/js/app.js"></script>
+</body>
+</html>

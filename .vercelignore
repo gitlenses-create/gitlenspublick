@@ -1,0 +1,4 @@
+_gameta_dump
+node_modules
+*.log
+.DS_Store
