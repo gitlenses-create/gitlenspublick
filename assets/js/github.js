@@ -1,29 +1,16 @@
 /*
  * GitLens — client-side GitHub data aggregation.
- *
- * The original site relied on a backend (`/api/user/:login`). This module
- * rebuilds the same data shape directly in the browser using the public
- * GitHub REST API, so GitLens works fully standalone on localhost.
- *
- * Optional: a GitHub personal access token (stored locally) lifts the
- * unauthenticated 60 req/hour limit to 5000 req/hour.
+ * Uses Vercel proxy when available, falls back to direct GitHub API.
  */
 (function () {
+    const DIRECT_API = "https://api.github.com";
     const TOKEN_KEY = "gitlens-token";
 
-    function apiBase() {
-        const host = window.location.hostname;
-        if (host === "localhost" || host === "127.0.0.1") {
-            return "https://api.github.com";
-        }
-        return "/api/github";
-    }
-
     function usesServerProxy() {
-        return apiBase() !== "https://api.github.com";
+        const host = window.location.hostname;
+        return host !== "localhost" && host !== "127.0.0.1";
     }
 
-    // Shared reactive-ish rate store (read by the app footer indicator).
     window.GitLensRate = window.GitLensRate || {requestsLeft: null};
 
     function getToken() {
@@ -44,26 +31,45 @@
         } catch (e) {}
     }
 
-    function client() {
+    function directClient() {
         const headers = {Accept: "application/vnd.github+json"};
         const token = getToken();
-        if (!usesServerProxy() && token) {
+        if (token) {
             headers.Authorization = "token " + token;
         }
+        return axios.create({baseURL: DIRECT_API, headers: headers});
+    }
 
-        const instance = axios.create({baseURL: apiBase(), headers: headers});
-
-        if (usesServerProxy()) {
-            instance.interceptors.request.use(config => {
-                const path = (config.url || "").replace(/^\//, "");
-                const params = {...(config.params || {})};
-                config.url = "";
-                config.params = {path, ...params};
-                return config;
-            });
-        }
-
+    function proxyClient() {
+        const instance = axios.create({
+            baseURL: "/api/github",
+            headers: {Accept: "application/vnd.github+json"},
+        });
+        instance.interceptors.request.use(config => {
+            const path = (config.url || "").replace(/^\//, "");
+            const params = {...(config.params || {})};
+            config.url = "";
+            config.params = {path, ...params};
+            return config;
+        });
         return instance;
+    }
+
+    function isProxyFailure(error) {
+        if (!error || !error.response) {
+            return true;
+        }
+        const status = error.response.status;
+        const body = error.response.data;
+        if (status === 404) {
+            if (typeof body === "string" && body.includes("NOT_FOUND")) {
+                return true;
+            }
+            if (body && body.message === "GitHub token not configured") {
+                return true;
+            }
+        }
+        return status >= 500;
     }
 
     function trackRate(response) {
@@ -74,9 +80,22 @@
         return response;
     }
 
+    async function apiGet(path, config) {
+        if (usesServerProxy()) {
+            try {
+                return trackRate(await proxyClient().get(path, config));
+            } catch (error) {
+                if (!isProxyFailure(error)) {
+                    throw error;
+                }
+            }
+        }
+        return trackRate(await directClient().get(path, config));
+    }
+
     async function refreshRate() {
         try {
-            const res = await client().get("/rate_limit");
+            const res = await apiGet("/rate_limit");
             const core = res.data && res.data.resources && res.data.resources.core;
             if (core) {
                 window.GitLensRate.requestsLeft = core.remaining;
@@ -92,29 +111,26 @@
         return pageMatch ? parseInt(pageMatch[1], 10) : null;
     }
 
-    async function fetchAllRepos(gh, login) {
+    async function fetchAllRepos(login) {
         let repos = [];
         let page = 1;
         while (true) {
-            const res = await gh.get(`/users/${login}/repos`, {
+            const res = await apiGet(`/users/${login}/repos`, {
                 params: {per_page: 100, page: page, type: "owner", sort: "pushed"}
             });
-            trackRate(res);
             repos = repos.concat(res.data);
             if (res.data.length < 100) break;
             page++;
-            if (page > 10) break; // safety cap (1000 repos)
+            if (page > 10) break;
         }
-        // Skip forks to mirror the "source" focus of the original.
         return repos.filter(r => !r.fork);
     }
 
-    async function commitCountForRepo(gh, login, repo) {
+    async function commitCountForRepo(login, repo) {
         try {
-            const res = await gh.get(`/repos/${login}/${repo}/commits`, {
+            const res = await apiGet(`/repos/${login}/${repo}/commits`, {
                 params: {author: login, per_page: 1}
             });
-            trackRate(res);
             const last = lastPageFromLink(res.headers && res.headers.link);
             if (last !== null) return last;
             return res.data.length;
@@ -123,12 +139,11 @@
         }
     }
 
-    async function recentCommitDates(gh, login, repo) {
+    async function recentCommitDates(login, repo) {
         try {
-            const res = await gh.get(`/repos/${login}/${repo}/commits`, {
+            const res = await apiGet(`/repos/${login}/${repo}/commits`, {
                 params: {author: login, per_page: 100}
             });
-            trackRate(res);
             return res.data
                 .map(c => c.commit && c.commit.author && c.commit.author.date)
                 .filter(Boolean);
@@ -154,10 +169,9 @@
     }
 
     async function buildProfile(login, onProgress) {
-        const gh = client();
         onProgress && onProgress("Loading profile…");
 
-        const userRes = trackRate(await gh.get(`/users/${login}`));
+        const userRes = await apiGet(`/users/${login}`);
         const u = userRes.data;
         const user = {
             login: u.login,
@@ -169,7 +183,7 @@
         };
 
         onProgress && onProgress("Loading repositories…");
-        const repos = await fetchAllRepos(gh, login);
+        const repos = await fetchAllRepos(login);
 
         const langRepoCount = {};
         const langStarCount = {};
@@ -186,14 +200,12 @@
             }
         });
 
-        // Commit-based data: real counts per repo via the Link header trick.
-        // Capped to keep the request budget reasonable on the public API.
         onProgress && onProgress("Counting commits…");
         const reposForCommits = repos.slice(0, 40);
         const repoCommitCountAll = {};
         const langCommitCount = {};
         for (const r of reposForCommits) {
-            const count = await commitCountForRepo(gh, login, r.name);
+            const count = await commitCountForRepo(login, r.name);
             if (count > 0) {
                 repoCommitCountAll[r.name] = count;
                 const lang = r.language || UNKNOWN_LANGUAGE;
@@ -201,13 +213,12 @@
             }
         }
 
-        // Commits-per-quarter trend from recent commits of the busiest repos.
         onProgress && onProgress("Building activity timeline…");
         const topCommitRepos = sortByValueDesc(repoCommitCountAll).slice(0, 8).map(e => e[0]);
         const quarterBuckets = {};
         const allDates = [];
         for (const repoName of topCommitRepos) {
-            const dates = await recentCommitDates(gh, login, repoName);
+            const dates = await recentCommitDates(login, repoName);
             dates.forEach(d => allDates.push(d));
         }
         allDates.forEach(d => {
@@ -236,7 +247,6 @@
         };
     }
 
-    // Build a contiguous quarter axis from earliest to latest seen quarter.
     function fillQuarters(buckets) {
         const keys = Object.keys(buckets);
         if (!keys.length) return {};
