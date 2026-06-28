@@ -6,10 +6,19 @@ module.exports = async function handler(req, res) {
     }
 
     try {
-        const segments = req.query.path;
-        const path = Array.isArray(segments) ? segments.join("/") : (segments || "");
         const url = new URL(req.url, `http://${req.headers.host}`);
-        const ghUrl = `https://api.github.com/${path}${url.search}`;
+
+        // Rewritten requests pass the GitHub path as ?path=users/login
+        let ghPath = url.searchParams.get("path") || "";
+        url.searchParams.delete("path");
+
+        if (!ghPath) {
+            ghPath = url.pathname.replace(/^\/api\/github\/?/, "");
+        }
+
+        ghPath = ghPath.replace(/^\/+/, "");
+        const query = url.searchParams.toString();
+        const ghUrl = `https://api.github.com/${ghPath}${query ? `?${query}` : ""}`;
 
         const ghResponse = await fetch(ghUrl, {
             method: req.method,
