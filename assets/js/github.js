@@ -9,8 +9,19 @@
  * unauthenticated 60 req/hour limit to 5000 req/hour.
  */
 (function () {
-    const API = "https://api.github.com";
     const TOKEN_KEY = "gitlens-token";
+
+    function apiBase() {
+        const host = window.location.hostname;
+        if (host === "localhost" || host === "127.0.0.1") {
+            return "https://api.github.com";
+        }
+        return "/api/github";
+    }
+
+    function usesServerProxy() {
+        return apiBase() !== "https://api.github.com";
+    }
 
     // Shared reactive-ish rate store (read by the app footer indicator).
     window.GitLensRate = window.GitLensRate || {requestsLeft: null};
@@ -36,10 +47,10 @@
     function client() {
         const headers = {Accept: "application/vnd.github+json"};
         const token = getToken();
-        if (token) {
+        if (!usesServerProxy() && token) {
             headers.Authorization = "token " + token;
         }
-        return axios.create({baseURL: API, headers: headers});
+        return axios.create({baseURL: apiBase(), headers: headers});
     }
 
     function trackRate(response) {
