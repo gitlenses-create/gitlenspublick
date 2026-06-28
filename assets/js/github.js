@@ -88,22 +88,36 @@
     }
 
     async function fetchStats(path) {
-        for (let attempt = 0; attempt < 6; attempt++) {
+        for (let attempt = 0; attempt < 3; attempt++) {
             try {
                 const res = await apiGet(path);
                 if (res.status === 202) {
-                    await sleep(1500 + attempt * 500);
+                    await sleep(800 + attempt * 400);
                     continue;
                 }
                 return res.data;
             } catch (e) {
-                if (attempt === 5) {
+                if (attempt === 2) {
                     return null;
                 }
-                await sleep(1000);
+                await sleep(500);
             }
         }
         return null;
+    }
+
+    async function mapPool(items, limit, fn) {
+        const results = new Array(items.length);
+        let index = 0;
+        async function worker() {
+            while (index < items.length) {
+                const i = index++;
+                results[i] = await fn(items[i], i);
+            }
+        }
+        const workers = Math.min(limit, items.length);
+        await Promise.all(Array.from({length: workers}, worker));
+        return results;
     }
 
     async function contributorCommits(login, repo) {
@@ -222,19 +236,31 @@
         const langCommitCount = {};
         const quarterBuckets = {};
 
-        for (const r of repos) {
+        // Most-recent repos first; cap keeps large profiles fast.
+        const reposForCommits = repos.slice(0, 80);
+
+        await mapPool(reposForCommits, 10, async (r) => {
             const count = await contributorCommits(login, r.name);
             if (count > 0) {
                 repoCommitCountAll[r.name] = count;
                 const lang = r.language || UNKNOWN_LANGUAGE;
                 langCommitCount[lang] = (langCommitCount[lang] || 0) + count;
             }
+        });
 
+        // Quarter chart: participation stats only for top commit repos (slow endpoint).
+        onProgress && onProgress("Building activity timeline…");
+        const topForTimeline = sortByValueDesc(repoCommitCountAll)
+            .slice(0, 12)
+            .map(([name]) => repos.find(r => r.name === name))
+            .filter(Boolean);
+
+        await mapPool(topForTimeline, 4, async (r) => {
             const participation = await fetchStats(`/repos/${login}/${r.name}/stats/participation`);
             if (participation && participation.owner) {
                 addParticipationToQuarters(participation.owner, quarterBuckets);
             }
-        }
+        });
 
         const quarterCommitCount = fillQuartersFromJoin(quarterBuckets, user.createdAt);
 
